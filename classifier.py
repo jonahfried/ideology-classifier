@@ -9,8 +9,7 @@ import time
 
 import numpy as np
 import torch
-from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
-                              TensorDataset)
+from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler, TensorDataset)
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
 
@@ -200,6 +199,8 @@ class InputExample(object):
         self.guid = guid
         self.text = text
         self.label = label
+    def __repr__(self):
+        return ("id = %d ; label = %s ; text = %s") % (self.guid, self.label, self.text)
 
 def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer):
     """ convert each example in a list to an InputFeatures """
