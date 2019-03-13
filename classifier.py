@@ -35,9 +35,7 @@ def main():
 
     model = get_model(args.cache_dir, args.local_rank, args.bert_model, num_labels, device, n_gpu)
 
-    global_step = 0
-    nb_tr_steps = 0
-    tr_loss = 0
+    step_tracker = StepValues()
 
     if not args.skip_train: 
         train_examples = processor.get_train_examples(args.data_dir, args.num_train_examples) # TODO merge with get_train_dataloader() ?
@@ -50,7 +48,7 @@ def main():
         optimizer = get_optimizer(model, args.learning_rate, args.warmup_proportion, num_train_optimization_steps)
         
         train_dataloader = get_train_dataloader(train_examples, tokenizer, label_list, args, num_train_optimization_steps) 
-        tr_loss, nb_tr_steps, global_step = train_model(model, optimizer, train_dataloader, args, device, n_gpu)
+        step_tracker = train_model(model, optimizer, train_dataloader, args.num_train_epochs, args.gradient_accumulation_steps, device, n_gpu)
 
         save_model(model, args, num_labels)
     
@@ -58,21 +56,21 @@ def main():
 
     if (args.local_rank == -1 or torch.distributed.get_rank() == 0) and not args.skip_eval:
         eval_dataloader = get_eval_dataloader(processor, args, tokenizer)
-        result = eval_model(model, device, eval_dataloader, args.skip_train, tr_loss, nb_tr_steps, global_step)
+        result = eval_model(model, device, eval_dataloader, args.skip_train, step_tracker)
         record_result(args, result)
 
-class step_values:
-    def __init__(self):
+class StepValues:
+    def __init__(self, global_step=0, nb_tr_steps=0, tr_loss=0):
         self.global_step = 0
-        self.nb_tr_stps = 0
+        self.nb_tr_steps = 0
         self.tr_loss = 0
 
 
-def train_model(model, optimizer, train_dataloader, args, device, n_gpu):
+def train_model(model, optimizer, train_dataloader, num_train_epochs, gradient_accumulation_steps, device, n_gpu):
     """ Trains the model on each example in the example set. """
     model.train()
     global_step = 0
-    for _ in trange(int(args.num_train_epochs), desc="Epoch"):
+    for _ in trange(int(num_train_epochs), desc="Epoch"):
         tr_loss = 0
         nb_tr_examples, nb_tr_steps = 0, 0
         for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
@@ -81,21 +79,26 @@ def train_model(model, optimizer, train_dataloader, args, device, n_gpu):
                 loss = model(input_ids, segment_ids, input_mask, label_ids)
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
-                if args.gradient_accumulation_steps > 1:
-                    loss = loss / args.gradient_accumulation_steps
+                if gradient_accumulation_steps > 1:
+                    loss = loss / gradient_accumulation_steps
 
                 loss.backward()
 
                 tr_loss += loss.item()
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
-                if (step + 1) % args.gradient_accumulation_steps == 0:
+                if (step + 1) % gradient_accumulation_steps == 0:
                     optimizer.step()
                     optimizer.zero_grad()
                     global_step += 1 
-    return tr_loss, nb_tr_steps, global_step
+    step_tracker = StepValues(
+        global_step=global_step,
+        nb_tr_steps=nb_tr_steps, 
+        tr_loss=tr_loss
+    )
+    return step_tracker
 
-def eval_model(model, device, eval_dataloader, skip_train, tr_loss, nb_tr_steps, global_step):
+def eval_model(model, device, eval_dataloader, skip_train, step_tracker):
     """ Determines the accuracy of the model's predictions for each example in the test set. 
      Returns as a dictionary with keys 'eval_loss', 'eval_accuracy', 'global_step', 'loss' """
     model.eval()
@@ -124,11 +127,11 @@ def eval_model(model, device, eval_dataloader, skip_train, tr_loss, nb_tr_steps,
 
     eval_loss = eval_loss / nb_eval_steps
     eval_accuracy = eval_accuracy / nb_eval_examples
-    loss = tr_loss/nb_tr_steps if not skip_train else None
+    loss = (step_tracker.tr_loss / step_tracker.nb_tr_steps) if not skip_train else None
     result = {
         'eval_loss': eval_loss,
         'eval_accuracy': eval_accuracy,
-        'global_step': global_step,
+        'global_step': step_tracker.global_step,
         'loss': loss
     }
     return result
@@ -169,16 +172,18 @@ class LeftRightProcessor:
         return ["left", "right"]
 
     def check_data_exists(self, data_dir, skip_train):
+        """ Raise error if can't data can not be found """
         cant_find_train_data = (not skip_train) and (not os.path.exists(data_dir+"/train.csv"))
         if cant_find_train_data: raise ValueError("could not find {}/train.csv".format(data_dir))
         cant_find_test_data = not os.path.exists(data_dir+"/test.csv")
         if cant_find_test_data: raise ValueError("could not find {}/test.csv".format(data_dir))
 
-
-    def get_train_examples(self, data_dir, num_train_examples):
+    def get_examples(self, data_dir, num_examples, file):
+        """ Pull rows out from csv file and return them as [InputExample] """
         examples = []
-        train_data = pd.read_csv(data_dir+"/train.csv", lineterminator="\n")
-        train_data = train_data.sample(n=num_train_examples)
+        path = os.path.join(data_dir, file)
+        train_data = pd.read_csv(path, lineterminator="\n")
+        train_data = train_data.sample(n=num_examples)
         for _, row in train_data.iterrows(): 
             guid = row.id 
             text = row.text
@@ -186,16 +191,11 @@ class LeftRightProcessor:
             examples.append(InputExample(guid, text, label=label))
         return examples
 
+    def get_train_examples(self, data_dir, num_train_examples):
+        return self.get_examples(data_dir, num_train_examples, "/train.csv")
+
     def get_test_examples(self, data_dir, num_test_examples):
-        examples = []
-        test_data = pd.read_csv(data_dir+"/test.csv", lineterminator="\n")
-        test_data = test_data.sample(n=num_test_examples)
-        for _, row in test_data.iterrows():
-            guid = row.id
-            text = row.text
-            label = row.label
-            examples.append(InputExample(guid, text, label=label))
-        return examples
+        return self.get_examples(data_dir, num_train_examples, "/test.csv")
 
 class InputExample(object):
     """A single training/test example for simple sequence classification."""
