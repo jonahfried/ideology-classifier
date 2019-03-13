@@ -23,10 +23,14 @@ NUM_LABELS = 2
 def main():
     parser = initialize_parser() 
     args = parser.parse_args() # get command line arguments
+    args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
 
     device, n_gpu = get_device_and_n_gpu(args)
-    train_batch_size, processor, num_labels, label_list, tokenizer = initialize_support_values(args)
-    
+    processor = LeftRightProcessor()
+    label_list = processor.get_labels()
+    tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=(not args.cased))
+
+    create_output_dir(args.output_dir)
     processor.check_data_exists(args.data_dir, args.skip_train)
 
     model = get_model(args.cache_dir, args.local_rank, args.bert_model, num_labels, device, n_gpu)
@@ -39,6 +43,9 @@ def main():
         train_examples = processor.get_train_examples(args.data_dir, args.num_train_examples) # TODO merge with get_train_dataloader() ?
 
         num_train_optimization_steps = int(len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
+        if args.local_rank != -1:
+            num_train_optimization_steps = num_train_optimization_steps // torch.distributed.get_world_size()
+
 
         optimizer = get_optimizer(model, args.learning_rate, args.warmup_proportion, num_train_optimization_steps)
         
@@ -47,12 +54,19 @@ def main():
 
         save_model(model, args, num_labels)
     
-    model = load_model(args, num_labels, device)
+    model = load_model(args, num_labels, device) # TODO does this work as expected?
 
-    if (args.local_rank == -1 or torch.distributed.get_rank() == 0): # and args.do_eval:
+    if (args.local_rank == -1 or torch.distributed.get_rank() == 0) and not args.skip_eval:
         eval_dataloader = get_eval_dataloader(processor, args, tokenizer)
         result = eval_model(model, device, eval_dataloader, args.skip_train, tr_loss, nb_tr_steps, global_step)
         record_result(args, result)
+
+class step_values:
+    def __init__(self):
+        self.global_step = 0
+        self.nb_tr_stps = 0
+        self.tr_loss = 0
+
 
 def train_model(model, optimizer, train_dataloader, args, device, n_gpu):
     """ Trains the model on each example in the example set. """
@@ -120,6 +134,7 @@ def eval_model(model, device, eval_dataloader, skip_train, tr_loss, nb_tr_steps,
     return result
 
 def accuracy(out, labels):
+    """ returns the number of predictions that equal the correct label """
     outputs = np.argmax(out, axis=1)
     return np.sum(outputs == labels)
 
@@ -250,27 +265,14 @@ class InputFeatures(object):
         self.segment_ids = segment_ids
         self.label_id = label_id
 
-# TODO find better way of initializing values
-def initialize_support_values(args): 
-    """ Adjusts batch size for gradient accumulation steps, creates output directories as needed,
-     defines the processor, number of labels, the list of label names, and the tokenizer. """
-    train_batch_size = args.train_batch_size // args.gradient_accumulation_steps # TODO figure out why/if this is needed
-
-    # if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
+def create_output_dir(output_dir): 
+    """creates output directories if needed """
+    # if os.path.exists(args.output_dir) and os.listdir(args.output_dir):    # TODO Keep or discard
     #     raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
     if not os.path.exists(os.path.join(args.output_dir, "eval_results")):
         os.makedirs(os.path.join(args.output_dir, "eval_results"))
-
-
-    processor = LeftRightProcessor()
-    num_labels = NUM_LABELS
-    label_list = processor.get_labels()
-
-    tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=(not args.cased))
-
-    return train_batch_size, processor, num_labels, label_list, tokenizer
 
 def get_model(cache_dir, local_rank, bert_model, num_labels, device, n_gpu):
     "Returns a model with the given specifications"
@@ -330,10 +332,6 @@ def save_model(model, args, num_labels):
     with open(output_config_file, 'w') as f:
         f.write(model_to_save.config.to_json_string())
 
-    # Load a trained model and config that you have fine-tuned
-    config = BertConfig(output_config_file)
-    model = BertForSequenceClassification(config, num_labels=num_labels) # TODO can skip this if trained?
-    model.load_state_dict(torch.load(output_model_file))
 
 def load_model(args, num_labels, device):
     """ Loads the model from the given directories and puts it on the correct computation device  """
@@ -399,6 +397,11 @@ def initialize_parser():
         "--skip_train",
         action='store_true',
         help="Whether to skip training."
+    )
+    parser.add_argument(
+        "--skip_eval",
+        action="store_true",
+        help="Whether to skip model evaluation"
     )
     parser.add_argument(
         "--cased",
