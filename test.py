@@ -1,6 +1,6 @@
 import unittest
 from classifier import *
-
+ 
 EXPECTED_EVAL_ACCURACY = .48
 EXPECTED_EVAL_LOSS =  0.6538470834493637
 EXPECTED_GLOBALSTEP = 2

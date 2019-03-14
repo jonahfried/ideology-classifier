@@ -207,7 +207,7 @@ class LeftRightProcessor:
         """ Raise error if can't data can not be found """
         cant_find_train_data = (not skip_train) and (not os.path.exists(data_dir+"/train.csv"))
         if cant_find_train_data: raise ValueError("could not find {}/train.csv".format(data_dir))
-        cant_find_test_data = not os.path.exists(data_dir+"/test.csv")
+        cant_find_test_data = not os.path.exists(data_dir+"/test.csv") 
         if cant_find_test_data: raise ValueError("could not find {}/test.csv".format(data_dir))
 
     def get_examples(self, data_dir, num_examples, file, seed):
