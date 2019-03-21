@@ -12,6 +12,7 @@ import argparse
 import os
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler, TensorDataset)
 from collections import namedtuple, OrderedDict
+from numpy import argmax
 
 def get_dataset(features): 
     """ Converts a set of features to a TensorDataset """
@@ -123,7 +124,10 @@ if __name__ == "__main__":
     )
 
     model = BertModel.from_pretrained(args.trained_model_dir)
-    model.to(device)
+    model.to(device) 
+    
+    label_predictor = BertForSequenceClassification.from_pretrained(args.trained_model_dir, num_labels=num_labels)
+    label_predictor.to(device)
     
     examples = processor.get_examples(num_examples, "test.csv")
     features = _convert_examples_to_features(examples, processor.get_labels(), max_seq_length, tokenizer)
@@ -136,6 +140,7 @@ if __name__ == "__main__":
     dl = get_eval_dataloader(features)
     
     model.eval()
+    label_predictor.eval()
     with open(output_file, "w", encoding='utf-8') as writer:
         for input_ids, input_mask, example_indices, _, label_ids in tqdm(dl, desc="dataloader"):
             input_ids = input_ids.to(device)
@@ -145,6 +150,11 @@ if __name__ == "__main__":
             all_encoder_layers, _ = model(input_ids, token_type_ids=None, attention_mask=input_mask)
             all_encoder_layers = all_encoder_layers
 
+            with torch.no_grad():
+                logits = label_predictor(input_ids, token_type_ids=None, attention_mask=input_mask)
+            logits = logits.detach().cpu().numpy()
+            predictions = argmax(logits, axis=1)
+            
             for b, example_index in enumerate(example_indices):
                 feature = features[example_index.item()]
                 unique_id = int(feature.case_id)
@@ -152,6 +162,8 @@ if __name__ == "__main__":
                 output_json = OrderedDict()
                 output_json["linex_index"] = int(unique_id)
                 output_json["label"] = int(label_ids[b])
+                output_json["confidence"] = int(abs(logits[b][0] - logits[b][1]))
+                output_json["prediction"] = int(predictions[b])
                 
                 layer_output = all_encoder_layers[-1].detach().cpu().numpy() # -1 corresponds to the last layer of the model before output or the output of the Transformer (i think)
                 layer_output = layer_output[b]
