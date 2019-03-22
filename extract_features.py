@@ -160,9 +160,9 @@ if __name__ == "__main__":
                 unique_id = int(feature.case_id)
 
                 output_json = OrderedDict()
-                output_json["linex_index"] = int(unique_id)
+                output_json["id"] = int(unique_id)
                 output_json["label"] = int(label_ids[b])
-                output_json["confidence"] = int(abs(logits[b][0] - logits[b][1]))
+                output_json["confidence"] = float(abs(logits[b][0] - logits[b][1]))
                 output_json["prediction"] = int(predictions[b])
                 
                 layer_output = all_encoder_layers[-1].detach().cpu().numpy() # -1 corresponds to the last layer of the model before output or the output of the Transformer (i think)
@@ -171,6 +171,6 @@ if __name__ == "__main__":
                     round(x.item(), 6) for x in layer_output[0] # 0 corresponds to the token [CLS]
                 ]
 
-                output_json["values"] = list(values)
+                output_json["vector"] = list(values)
                 output_json["text"] = unique_id_to_text[unique_id]
                 writer.write(json.dumps(output_json) + "\n")
