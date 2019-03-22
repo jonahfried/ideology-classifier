@@ -27,3 +27,7 @@ From classifier.py -h:
 > -                     [--num_train_examples NUM_TRAIN_EXAMPLES]
 > -                     [--num_test_examples NUM_TEST_EXAMPLES]
                      
+
+# document_vector.ipynb
+Visualizes the spread of data and their similarities to one another. 
+use extract_features.py to prepare json for document_vector notebook.
